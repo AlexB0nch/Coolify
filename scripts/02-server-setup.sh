@@ -32,12 +32,45 @@ die()  { printf '\033[1;31m[x] %s\033[0m\n' "$*" >&2; exit 1; }
 
 say "Сервер: ${PRETTY_NAME} / $(uname -m) / RAM $(free -h | awk '/^Mem:/{print $2}') / диск $(df -h --output=avail / | tail -1 | tr -d ' ')"
 
+DISK_FREE_GB=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+if [[ ${DISK_FREE_GB:-0} -lt 20 ]]; then
+  warn "Свободно всего ${DISK_FREE_GB} ГБ. Coolify рекомендует 20 ГБ."
+  warn "Установка пройдёт, но образы и сборки заполнят диск быстро — см. раздел"
+  warn "про очистку в README, а лучше расширь диск у хостера."
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+
+# apt-локи: фоновые обновления Ubuntu (unattended-upgrades, apt-daily) держат
+# /var/lib/dpkg/lock-frontend и роняют установщик Docker. Гасим их на время
+# работы скрипта и возвращаем в конце.
+say "Останавливаю фоновые обновления на время установки"
+systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+systemctl stop unattended-upgrades.service 2>/dev/null || true
+
+wait_for_apt() {
+  local i
+  for i in $(seq 1 180); do
+    if ! pgrep -x apt >/dev/null 2>&1 \
+    && ! pgrep -x apt-get >/dev/null 2>&1 \
+    && ! pgrep -x dpkg >/dev/null 2>&1 \
+    && ! pgrep -x unattended-upgr >/dev/null 2>&1; then
+      return 0
+    fi
+    [[ $((i % 6)) -eq 1 ]] && echo "  жду, пока освободится apt/dpkg..."
+    sleep 5
+  done
+  die "apt/dpkg занят больше 15 минут. Посмотри 'ps aux | grep -E \"apt|dpkg\"' и запусти скрипт снова."
+}
+
+APT_OPTS=(-o DPkg::Lock::Timeout=600)
+
 # --- система ---------------------------------------------------------------
 say "Обновляю пакеты (это самая долгая часть)"
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get upgrade -y -qq
-apt-get install -y -qq \
+wait_for_apt
+apt-get "${APT_OPTS[@]}" update -qq
+apt-get "${APT_OPTS[@]}" upgrade -y -qq
+apt-get "${APT_OPTS[@]}" install -y -qq \
   curl wget git jq ca-certificates gnupg \
   ufw fail2ban unattended-upgrades \
   htop tmux rsync
@@ -109,21 +142,38 @@ EOF
 systemctl enable --now fail2ban >/dev/null
 systemctl restart fail2ban
 
-# --- автообновления безопасности -------------------------------------------
-say "Включаю unattended-upgrades"
-cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
-APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Unattended-Upgrade "1";
-EOF
-
 # --- Coolify ---------------------------------------------------------------
+# Ставится ДО включения автообновлений: установщик Docker внутри ходит в apt,
+# а параллельный unattended-upgrade забирает dpkg-лок и валит установку.
 if [[ "$SKIP_COOLIFY" == "1" ]]; then
   warn "SKIP_COOLIFY=1 — установку Coolify пропускаю"
 else
   say "Ставлю Coolify (официальный установщик, он же поставит Docker)"
+  wait_for_apt
   curl -fsSL https://cdn.coollabs.io/coolify/install.sh -o /tmp/coolify-install.sh
   bash /tmp/coolify-install.sh
+  command -v docker >/dev/null || die "Docker так и не установился — перезапусти скрипт."
 fi
+
+# --- автообновления безопасности -------------------------------------------
+say "Включаю unattended-upgrades и фоновые apt-таймеры"
+cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+systemctl start apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+
+# --- еженедельная чистка Docker --------------------------------------------
+# На маленьком диске мусор от сборок съедает место за считанные недели.
+say "Ставлю еженедельную очистку неиспользуемых образов Docker"
+cat > /etc/cron.weekly/docker-prune <<'EOF'
+#!/bin/sh
+# Удаляет образы/слои, не связанные ни с одним контейнером.
+# Тома (данные баз) НЕ трогает.
+docker image prune -af --filter 'until=168h' >/dev/null 2>&1
+docker builder prune -af --filter 'until=168h' >/dev/null 2>&1
+EOF
+chmod +x /etc/cron.weekly/docker-prune
 
 IP=$(curl -fsS --max-time 10 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
 
