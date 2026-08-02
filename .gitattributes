@@ -1,0 +1,3 @@
+# Скрипты выполняются в bash (в т.ч. в WSL/Git Bash на Windows).
+# CRLF ломает shebang и строки с продолжением, поэтому фиксируем LF всегда.
+*.sh text eol=lf

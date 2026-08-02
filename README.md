@@ -8,6 +8,11 @@
 Три команды у себя в терминале (macOS / Linux / WSL / Git Bash).
 Пароль root спросят **один раз**, в первой команде.
 
+> **Windows:** запускать надо именно в bash, а не в PowerShell — в PowerShell 5.1
+> нет ни `&&`, ни перенаправления `< файл`. Набери `bash`, нажми Enter и все
+> команды ниже выполняй уже внутри него. Если `ssh` в WSL не найден:
+> `sudo apt update && sudo apt install -y openssh-client`.
+
 ```bash
 git clone https://github.com/AlexB0nch/Coolify.git coolify-setup && cd coolify-setup
 
