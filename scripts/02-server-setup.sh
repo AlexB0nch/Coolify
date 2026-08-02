@@ -198,6 +198,19 @@ PY
   export DOCKER_ADDRESS_POOL_SIZE=24
   export DOCKER_POOL_FORCE_OVERRIDE=true
 
+  # Установщик проверяет только наличие бинарника docker, а со следующего шага
+  # обращается к демону и молча падает, если тот остановлен.
+  if command -v docker >/dev/null && ! docker info >/dev/null 2>&1; then
+    say "Docker установлен, но демон не запущен — запускаю"
+    systemctl start docker
+    docker info >/dev/null 2>&1 || die "Демон Docker не поднимается: systemctl status docker"
+  fi
+
+  # Установщик перезаписывает /root/.ssh/authorized_keys, добавляя туда свой
+  # ключ для управления хостом, и может потерять наш. Сохраняем и вернём.
+  AK=/root/.ssh/authorized_keys
+  [[ -s "$AK" ]] && cp "$AK" /tmp/authorized_keys.before-coolify
+
   say "Ставлю Coolify (официальный установщик, он же поставит Docker)"
   wait_for_apt
   curl -fsSL https://cdn.coollabs.io/coolify/install.sh -o /tmp/coolify-install.sh
@@ -223,6 +236,17 @@ PY
     die "Останавливаюсь."
   fi
   command -v docker >/dev/null || die "Docker так и не установился — перезапусти скрипт."
+
+  # Возвращаем ключи, которые мог потерять установщик
+  if [[ -f /tmp/authorized_keys.before-coolify ]]; then
+    restored=0
+    while read -r key; do
+      [[ -z "$key" ]] && continue
+      grep -qxF "$key" "$AK" 2>/dev/null || { echo "$key" >> "$AK"; restored=1; }
+    done < /tmp/authorized_keys.before-coolify
+    [[ $restored -eq 1 ]] && say "Вернул SSH-ключи, потерянные установщиком Coolify"
+    chmod 600 "$AK"
+  fi
 
   # Проверяем, что сеть жива: если Docker всё-таки перехватил маршрут, сервер
   # станет недоступен снаружи, и починить можно будет только из VNC-консоли.
