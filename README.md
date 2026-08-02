@@ -148,5 +148,20 @@ ssh coolify 'journalctl -u ssh -n 50'                 # проблемы с SSH
 не на этот IP: проверь `dig +short домен` и что порт 80 открыт (Let's Encrypt
 ходит по HTTP-01).
 
+**`Connection timed out` на порт 22, хотя раньше пускало** — почти наверняка
+fail2ban забанил твой IP после серии неудачных попыток. DROP в iptables даёт
+именно таймаут, а не отказ. Бан снимается сам через час; снять сразу можно
+только из веб-консоли хостера:
+
+```bash
+fail2ban-client status sshd                  # список забаненных
+fail2ban-client set sshd unbanip <твой-IP>   # свой IP: curl ifconfig.me
+```
+
+Скрипт вносит IP, с которого он был запущен, в `ignoreip`, так что при
+запуске через `ssh coolify` этой ситуации возникать не должно. Если ставишь
+из консоли хостера, укажи адрес явно:
+`ssh coolify 'ADMIN_IP=1.2.3.4 bash -s' < scripts/02-server-setup.sh`
+
 Заблокировал себе SSH — заходи через веб-консоль (VNC) хостера и откатывай:
 `rm /etc/ssh/sshd_config.d/99-hardening.conf && systemctl restart ssh`.

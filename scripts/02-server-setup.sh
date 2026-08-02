@@ -131,13 +131,25 @@ ufw status verbose
 
 # --- fail2ban --------------------------------------------------------------
 say "Включаю fail2ban для SSH"
-cat > /etc/fail2ban/jail.d/sshd.local <<'EOF'
+# IP, с которого сейчас пришли по SSH, вносим в исключения: иначе одна серия
+# неудачных попыток запирает администратора снаружи, и чинить приходится
+# через веб-консоль хостера. Можно задать явно: ADMIN_IP=1.2.3.4
+ADMIN_IP="${ADMIN_IP:-${SSH_CLIENT%% *}}"
+IGNORE_IP="127.0.0.1/8 ::1"
+if [[ -n "${ADMIN_IP:-}" ]]; then
+  IGNORE_IP="$IGNORE_IP $ADMIN_IP"
+  say "  твой IP $ADMIN_IP добавлен в исключения fail2ban"
+else
+  warn "  не определил твой IP — сможешь забанить сам себя. Задай ADMIN_IP=..."
+fi
+cat > /etc/fail2ban/jail.d/sshd.local <<EOF
 [sshd]
 enabled  = true
 backend  = systemd
 maxretry = 5
 findtime = 10m
 bantime  = 1h
+ignoreip = ${IGNORE_IP}
 EOF
 systemctl enable --now fail2ban >/dev/null
 systemctl restart fail2ban
