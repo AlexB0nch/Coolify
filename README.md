@@ -9,7 +9,7 @@
 Пароль root спросят **один раз**, в первой команде.
 
 ```bash
-git clone <этот-репозиторий> coolify-setup && cd coolify-setup
+git clone https://github.com/AlexB0nch/Coolify.git coolify-setup && cd coolify-setup
 
 # 1. ключи: создать, залить на сервер, прописать алиас `coolify`
 bash scripts/01-local-keys.sh
