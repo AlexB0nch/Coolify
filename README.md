@@ -148,6 +148,31 @@ ssh coolify 'journalctl -u ssh -n 50'                 # проблемы с SSH
 не на этот IP: проверь `dig +short домен` и что порт 80 открыт (Let's Encrypt
 ходит по HTTP-01).
 
+**Сервер пропал из сети целиком (не идёт даже ping), но VNC-консоль работает** —
+мост Docker занял подсеть шлюза хостера. Установщик Coolify по умолчанию отдаёт
+Docker пул `10.0.0.0/8`, а многие провайдеры маршрутизируют VPS через `10.x`;
+тогда `docker0` присваивает себе адрес шлюза, и весь трафик уходит в никуда.
+Диагноз виден в `ip route` — адрес после `default via` совпадает с `src` у
+`docker0`. Лечение из консоли:
+
+```bash
+systemctl stop docker docker.socket
+ip link del docker0                       # связь возвращается сразу
+ip link del $(ip -br link | awk '/^br-/{print $1}')
+
+cp /etc/docker/daemon.json /etc/docker/daemon.json.bak
+cat > /etc/docker/daemon.json <<'EOF'
+{ "default-address-pools": [ { "base": "172.28.0.0/14", "size": 24 } ],
+  "bip": "172.27.0.1/24" }
+EOF
+systemctl start docker
+docker network rm coolify     # пересоздастся в новом диапазоне
+ping -c 3 8.8.8.8
+```
+
+Скрипт `02-server-setup.sh` подбирает непересекающийся диапазон сам и проверяет
+связность после установки, так что повторно это возникнуть не должно.
+
 **`Connection timed out` на порт 22, хотя раньше пускало** — почти наверняка
 fail2ban забанил твой IP после серии неудачных попыток. DROP в iptables даёт
 именно таймаут, а не отказ. Бан снимается сам через час; снять сразу можно

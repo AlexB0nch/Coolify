@@ -160,6 +160,44 @@ systemctl restart fail2ban
 if [[ "$SKIP_COOLIFY" == "1" ]]; then
   warn "SKIP_COOLIFY=1 — установку Coolify пропускаю"
 else
+  # Установщик Coolify по умолчанию отдаёт Docker пул 10.0.0.0/8 — весь
+  # приватный диапазон 10.x. Многие хостеры маршрутизируют VPS через адреса
+  # оттуда, и тогда docker0 забирает себе IP шлюза, после чего сервер теряет
+  # сеть целиком и чинить можно только из VNC-консоли. Выбираем пул, который
+  # не пересекается с уже существующими маршрутами и адресами.
+  say "Подбираю диапазон адресов для Docker, не конфликтующий с сетью хостера"
+  DOCKER_POOL=$(python3 - <<'PY'
+import ipaddress, subprocess
+
+used = []
+def add(net):
+    try: used.append(ipaddress.ip_network(net, strict=False))
+    except ValueError: pass
+
+for line in subprocess.run(['ip','-o','route'], capture_output=True, text=True).stdout.splitlines():
+    t = line.split()
+    if not t: continue
+    if t[0] == 'default':
+        if 'via' in t: add(t[t.index('via')+1] + '/24')   # подсеть шлюза целиком
+    else:
+        add(t[0])
+for line in subprocess.run(['ip','-o','-4','addr'], capture_output=True, text=True).stdout.splitlines():
+    t = line.split()
+    if 'inet' in t: add(t[t.index('inet')+1])
+
+used = [u for u in used if u.version == 4]
+for cand in ('172.28.0.0/14', '172.16.0.0/14', '192.168.128.0/17', '10.192.0.0/12'):
+    c = ipaddress.ip_network(cand)
+    if not any(c.overlaps(u) for u in used):
+        print(cand); break
+PY
+)
+  [[ -n "$DOCKER_POOL" ]] || die "Не нашёл свободный диапазон для Docker. Разбирайся руками: ip route"
+  say "  выбран пул $DOCKER_POOL (по умолчанию установщик взял бы 10.0.0.0/8)"
+  export DOCKER_ADDRESS_POOL_BASE="$DOCKER_POOL"
+  export DOCKER_ADDRESS_POOL_SIZE=24
+  export DOCKER_POOL_FORCE_OVERRIDE=true
+
   say "Ставлю Coolify (официальный установщик, он же поставит Docker)"
   wait_for_apt
   curl -fsSL https://cdn.coollabs.io/coolify/install.sh -o /tmp/coolify-install.sh
@@ -185,6 +223,21 @@ else
     die "Останавливаюсь."
   fi
   command -v docker >/dev/null || die "Docker так и не установился — перезапусти скрипт."
+
+  # Проверяем, что сеть жива: если Docker всё-таки перехватил маршрут, сервер
+  # станет недоступен снаружи, и починить можно будет только из VNC-консоли.
+  say "Проверяю сетевую связность после установки Docker"
+  if ping -c 2 -W 3 1.1.1.1 >/dev/null 2>&1 || ping -c 2 -W 3 8.8.8.8 >/dev/null 2>&1; then
+    say "  сеть в порядке"
+  else
+    warn "СЕРВЕР ПОТЕРЯЛ СЕТЬ. Почти наверняка мост Docker занял подсеть шлюза."
+    warn "Маршруты сейчас:"; ip route
+    warn "Чинить из VNC-консоли хостера:"
+    warn "  systemctl stop docker docker.socket"
+    warn "  ip link del docker0"
+    warn "  ip link del \$(ip -br link | awk '/^br-/{print \$1}')"
+    die "Останавливаюсь, пока не сделал хуже."
+  fi
 fi
 
 # --- автообновления безопасности -------------------------------------------
