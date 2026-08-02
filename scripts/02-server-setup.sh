@@ -151,7 +151,27 @@ else
   say "Ставлю Coolify (официальный установщик, он же поставит Docker)"
   wait_for_apt
   curl -fsSL https://cdn.coollabs.io/coolify/install.sh -o /tmp/coolify-install.sh
-  bash /tmp/coolify-install.sh
+
+  # Установщик падает с первой же неудачной попытки скачать образ, а обрывы и
+  # лимиты Docker Hub — обычное дело. Он идемпотентен, поэтому просто повторяем.
+  ok=0
+  for attempt in 1 2 3; do
+    say "Попытка установки Coolify ${attempt}/3"
+    if bash /tmp/coolify-install.sh; then ok=1; break; fi
+    warn "Попытка ${attempt} не удалась."
+    df -h / | tail -1
+    docker system df 2>/dev/null || true
+    [[ $attempt -lt 3 ]] && { warn "Повтор через 20 секунд..."; sleep 20; }
+  done
+
+  if [[ $ok -ne 1 ]]; then
+    echo
+    warn "Установщик Coolify не отработал за 3 попытки. Настоящую причину покажет:"
+    warn "  docker pull coollabsio/coolify:latest"
+    warn "Чаще всего это: кончилось место на диске (df -h /) либо лимит"
+    warn "анонимных загрузок Docker Hub (тогда помогает 'docker login')."
+    die "Останавливаюсь."
+  fi
   command -v docker >/dev/null || die "Docker так и не установился — перезапусти скрипт."
 fi
 
