@@ -400,8 +400,9 @@ REMOTE
   cat <<EOF
 
 Раскладка каталога:
-  ${REMOTE_DIR}/coolify/coolify-db-<ip>/     — база самой панели
-  ${REMOTE_DIR}/databases/<команда>/<база>/  — базы проектов
+  ${REMOTE_DIR}/coolify/coolify-db-<адрес>/       — база самой панели; для локального
+                                                    сервера адрес — hostdockerinternal
+  ${REMOTE_DIR}/databases/<команда>-<id>/<база>/  — базы проектов
 
 Имена говорят о формате, он важен при восстановлении:
   pg-dump-<база>-<время>.dmp   — pg_dump --format=custom, разворачивать pg_restore
