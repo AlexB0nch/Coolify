@@ -455,6 +455,7 @@ print(json.dumps({
     "git_branch": e["GIT_BRANCH"],
     "is_auto_deploy_enabled": True,
     "is_force_https_enabled": True,
+    "is_preserve_repository_enabled": True,
     "connect_to_docker_network": True,
 }))')
   api PATCH "/applications/${APP_UUID}" "$payload"
@@ -488,6 +489,10 @@ b = {
     "description": "PPPP Bot Hub: nginx + frontend + backend + db + redis + waha",
     "is_auto_deploy_enabled": True,
     "is_force_https_enabled": True,
+    # nginx монтирует ./nginx/coolify.conf прямо из репозитория. Если клон
+    # удалить после сборки, на его месте окажется пустая директория и
+    # контейнер не стартует — поэтому исходники нужно сохранять.
+    "is_preserve_repository_enabled": True,
     "instant_deploy": False,
 }
 if e["WITH_DOMAINS"] == "1":
@@ -718,7 +723,26 @@ else
     else
       warn "Статус деплоя: ${STATUS:-неизвестен}. Логи:"
       warn "  ${COOLIFY_URL}/project/${PROJECT_UUID}"
-      printf '%s' "$RESP" | jget 'd.get("logs","")' | tail -60
+      # logs приходит строкой с JSON-массивом записей {output, command, ...}
+      printf '%s' "$RESP" | "$PY" -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit
+raw = d.get("logs") or "[]"
+if isinstance(raw, str):
+    try:
+        raw = json.loads(raw)
+    except Exception:
+        print(raw[-4000:]); raise SystemExit
+for e in (raw or [])[-80:]:
+    if isinstance(e, dict):
+        line = e.get("output") or e.get("command") or ""
+        for l in str(line).splitlines():
+            print("    " + l)
+    else:
+        print("    " + str(e))' || true
     fi
     # backend поднимается healthy не раньше start_period=40s, nginx ждёт его
     say "Пауза 60s: backend становится healthy, nginx стартует после него"
