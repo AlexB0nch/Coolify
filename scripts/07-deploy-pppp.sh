@@ -281,23 +281,56 @@ if [[ "$SOURCE" == "deploy-key" ]]; then
 elif [[ -z "$GITHUB_APP_UUID" ]]; then
   api GET /github-apps
   if api_ok; then
-    # В списке всегда лежит встроенный источник "Public GitHub": у него нет ни
-    # app_id, ни ключа, и приватный репозиторий он отдать не может. Попытка
-    # выпустить для него installation-токен роняет API пятисоткой
-    # (Attempt to read property "private_key" on null). Берём только настоящее
-    # приложение — с app_id и installation_id.
-    GITHUB_APP_UUID=$(printf '%s' "$RESP" | "$PY" -c '
+    # Источников в панели может быть несколько, и каждый видит только те
+    # репозитории, на которые установлен. Брать первый попавшийся нельзя:
+    # чужое приложение ответит 404 на наш репозиторий. Поэтому кандидаты —
+    # все с заполненным app_id (встроенный Public GitHub его не имеет), а
+    # выбирается тот, который действительно видит GIT_REPO.
+    CANDIDATES=$(printf '%s' "$RESP" | "$PY" -c '
 import sys, json
 try:
     d = json.load(sys.stdin)
 except Exception:
-    print(""); raise SystemExit
+    raise SystemExit
 items = d if isinstance(d, list) else (d.get("data") or [])
-# Признак настоящего приложения — заполненный app_id. installation_id в
-# списке есть не всегда, поэтому он лишь повышает приоритет, а не отсекает.
-usable = [x for x in items if isinstance(x, dict) and x.get("app_id")]
-usable.sort(key=lambda x: 0 if x.get("installation_id") else 1)
-print(usable[0]["uuid"] if usable else "")' 2>/dev/null || true)
+for x in items:
+    if isinstance(x, dict) and x.get("app_id"):
+        print("%s\t%s\t%s" % (x.get("uuid", ""), x.get("id", ""), x.get("name", "")))' 2>/dev/null || true)
+
+    while IFS=$'\t' read -r cand_uuid cand_id cand_name; do
+      [[ -n "$cand_uuid" ]] || continue
+      if [[ -z "$cand_id" || "$cand_id" == "0" ]]; then
+        # Без числового id список репозиториев не запросить — оставляем как
+        # запасной вариант, вдруг других кандидатов не окажется.
+        [[ -z "${FALLBACK_UUID:-}" ]] && FALLBACK_UUID="$cand_uuid"
+        continue
+      fi
+      api GET "/github-apps/${cand_id}/repositories"
+      if api_ok && printf '%s' "$RESP" | NEEDLE="$GIT_REPO" "$PY" -c '
+import sys, json, os
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+items = d.get("repositories") if isinstance(d, dict) else d
+names = [(i.get("full_name") or "").lower() for i in (items or []) if isinstance(i, dict)]
+sys.exit(0 if os.environ["NEEDLE"].lower() in names else 1)' 2>/dev/null; then
+        GITHUB_APP_UUID="$cand_uuid"
+        ok "Приложение '${cand_name}' видит ${GIT_REPO}"
+        break
+      fi
+      warn "приложение '${cand_name}' репозиторий ${GIT_REPO} не видит — пропускаю"
+    done <<<"$CANDIDATES"
+
+    if [[ -z "$GITHUB_APP_UUID" && -n "${FALLBACK_UUID:-}" ]]; then
+      GITHUB_APP_UUID="$FALLBACK_UUID"
+      warn "проверить доступ через API не вышло — беру приложение ${GITHUB_APP_UUID}"
+    fi
+    if [[ -z "$GITHUB_APP_UUID" && -n "$CANDIDATES" ]]; then
+      die "ни одно из приложений не видит ${GIT_REPO}. Установи нужное на этот
+репозиторий (Sources → приложение → Repositories) либо укажи его явно:
+GITHUB_APP_UUID=<uuid> bash scripts/07-deploy-pppp.sh"
+    fi
   fi
 fi
 if [[ -n "$GITHUB_APP_UUID" ]]; then
