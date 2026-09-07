@@ -102,12 +102,25 @@ say "GitHub App"
 api GET /github-apps
 echo "    список (${CODE}): $(short "$RESP")"
 if [[ -z "$GITHUB_APP_UUID" ]]; then
-  GITHUB_APP_UUID=$(printf '%s' "$RESP" | jget '(d[0]["uuid"] if isinstance(d, list) and d else (d.get("data") or [{}])[0].get("uuid",""))')
+  # Встроенный "Public GitHub" не в счёт: у него нет ни app_id, ни ключа, и
+  # выпуск installation-токена для него роняет API пятисоткой. Берём настоящее
+  # приложение — с заполненным app_id.
+  GITHUB_APP_UUID=$(printf '%s' "$RESP" | "$PY" -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(""); raise SystemExit
+items = d if isinstance(d, list) else (d.get("data") or [])
+usable = [x for x in items if isinstance(x, dict) and x.get("app_id")]
+usable.sort(key=lambda x: 0 if x.get("installation_id") else 1)
+print(usable[0]["uuid"] if usable else "")' 2>/dev/null || true)
 fi
 
 GH_OK=0
 if [[ -z "$GITHUB_APP_UUID" ]]; then
-  warn "GitHub App не подключён — остаётся путь через ключ на чтение."
+  warn "Настоящего GitHub App нет, только встроенный Public GitHub."
+  warn "Остаётся путь через ключ на чтение: SOURCE=deploy-key в 07-deploy-pppp.sh."
 else
   echo "    uuid: ${GITHUB_APP_UUID}"
   api GET "/github-apps/${GITHUB_APP_UUID}/repositories"
