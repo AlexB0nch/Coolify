@@ -21,7 +21,7 @@ COOLIFY_URL=https://coolify.твойдомен.ru bash scripts/07-deploy-pppp.sh
 | 1–2 | находит сервер и источник: GitHub App, а если его нет — заводит ключ на чтение |
 | 3 | проект `pppp`, окружение `production` |
 | 4 | генерирует `POSTGRES_PASSWORD`, `SECRET_KEY`, `WAHA_API_KEY`, `WAHA_WEBHOOK_SECRET`, кладёт в `~/.coolify-pppp-secrets.env` (chmod 600) |
-| 5 | ресурс `pppp-bot-hub`: `build_pack=dockercompose`, `docker_compose_location=/docker-compose.coolify.yml`, домен **только сервису nginx**, автодеплой с `main`, `connect_to_docker_network=true` |
+| 5 | ресурс `pppp-bot-hub`: `build_pack=dockercompose`, `docker_compose_location=/docker-compose.coolify.yml`, домен **только сервису nginx**, автодеплой с `main`, `connect_to_docker_network=true`, `is_preserve_repository_enabled=true` |
 | 6 | 35 переменных окружения (список — из `.env.coolify.example` репозитория) |
 | 7 | печатает, какому сервису достался домен, и ругается, если он утёк на backend/frontend/waha |
 | 8 | деплой, ожидание статуса, пауза 60 с на `start_period` бэкенда |
@@ -55,9 +55,14 @@ production.ERROR: Attempt to read property "private_key" on null
   at /var/www/html/bootstrap/helpers/github.php:173
 ```
 
-Скрипт брал первый элемент `/github-apps` и принимал заглушку за приложение.
-Теперь он отбирает только источники с непустыми `app_id` и `installation_id`,
-а если таких нет — уходит на ключ на чтение и говорит об этом.
+Дальше выяснилось, что источников в панели несколько (`skillcheck-github`,
+`valueprop-alexshein-com`, `p-p-p-p-git-hub-app`), и каждый видит только те
+репозитории, на которые установлен: чужое приложение отвечало честным 404 на
+`AlexB0nch/pppp`. Поэтому скрипт теперь не берёт первое попавшееся, а
+перебирает кандидатов с непустым `app_id` и выбирает то, которое реально
+видит нужный репозиторий (`/github-apps/<числовой id>/repositories` — этот
+эндпоинт принимает именно числовой id, с uuid запрос падает в базе). Если не
+видит никто — останавливается и говорит, что установить.
 
 Два способа дать Coolify доступ к приватному `AlexB0nch/pppp`:
 
@@ -75,47 +80,54 @@ production.ERROR: Attempt to read property "private_key" on null
 
 ## Что нашлось в самом проекте
 
-Три вещи, которые скрипт починить не может, — по условию задачи файлы
-репозитория `pppp` не правятся.
+### 1. Две A-записи у домена — было блокером, снято
 
-### 1. У домена две A-записи — это блокер
+`pppp.alexshein.com` указывал сразу на `95.85.242.143` и на `92.53.96.193`.
+Let's Encrypt при HTTP-01 ходит на адрес из DNS и через раз попадал бы не на
+тот сервер — сертификат не выписался бы. Лишняя запись удалена, скрипт
+проверяет это перед каждым запуском и останавливается, если записей снова
+станет больше одной (обойти — `IGNORE_DNS=1`).
+
+### 2. nginx монтирует файл из репозитория
+
+У сервиса `nginx` есть `volumes: ./nginx/coolify.conf:/etc/nginx/conf.d/default.conf:ro`.
+Coolify по умолчанию удаляет клон после сборки: docker создаёт на месте
+отсутствующего файла пустую директорию, и контейнер не стартует. В первом
+прогоне так и вышло — пять сервисов поднялись healthy, а деплой был помечен
+`failed` именно из-за отсутствующего nginx, и Traefik отдавал свой дефолтный
+сертификат, потому что роутера для домена не появилось.
+
+Лечится настройкой ресурса, файлы репозитория править не нужно: скрипт ставит
+`is_preserve_repository_enabled=true`. Если этот тумблер когда-нибудь снимут в
+UI (Advanced → **Preserve Repository During Deployment**), nginx отвалится
+снова тем же образом.
+
+### 3. Метка `traefik.docker.network` — капкан не сработал
+
+В compose-файле метки нет, и по опыту из [постмортема](postmortem-https-skillcheck.md)
+это грозило зависанием HTTPS. На практике Coolify проставил её сам:
 
 ```
-pppp.alexshein.com. -> 95.85.242.143   (сервер с Coolify)
-pppp.alexshein.com. -> 92.53.96.193    (лишняя)
+сети:  coolify eltkspxrfcj6ceukc4byanmd
+метка: eltkspxrfcj6ceukc4byanmd
 ```
 
-Let's Encrypt при HTTP-01 ходит на адрес из DNS; попадая на второй сервер,
-он не находит токен и сертификат не выписывается. Даже после выписки
-половина запросов уходила бы не туда. Лишнюю запись надо удалить **до**
-деплоя — скрипт на этом останавливается специально (обойти можно
-`IGNORE_DNS=1`, но смысла в этом нет).
+Прокси подключён к сети приложения, Traefik берёт адрес именно из неё —
+неоднозначности, которая убила skillcheck, здесь нет. Проверка в скрипте
+осталась: она сработает, если метка пропадёт после смены настроек или
+обновления панели.
 
-### 2. Нет метки `traefik.docker.network`
-
-В `docker-compose.coolify.yml` у сервиса `nginx` нет
-`labels: [traefik.docker.network=coolify]`. Это ровно тот капкан, который
-описан в [постмортеме](postmortem-https-skillcheck.md): compose создаёт свою
-сеть, контейнер оказывается в нескольких сетях сразу, и Traefik выбирает IP
-наугад — HTTP отдаёт редирект мгновенно, а HTTPS виснет до таймаута.
-
-`connect_to_docker_network=true`, который скрипт ставит, подключает
-контейнеры к общей сети `coolify`, но выбор сети прокси не фиксирует.
-Поэтому после деплоя скрипт смотрит метку и сети контейнера nginx и
-предупреждает, если метки нет, а сетей больше одной. Временное лечение —
-`docker network connect <uuid>_default coolify-proxy`; постоянное — метка в
-compose-файле на стороне `pppp`.
-
-### 3. `POSTGRES_PASSWORD` без `:?`
+### 4. `POSTGRES_PASSWORD` объявлен без `:?`
 
 В ТЗ сказано, что три переменные помечены `${VAR:?}` и без них деплой падает
 с явной ошибкой. Фактически так объявлены только `DATABASE_URL` и
-`SECRET_KEY`. У `POSTGRES_PASSWORD` стоит голая подстановка `${POSTGRES_PASSWORD}`:
-пустое значение не остановит compose, а уронит контейнер `db` уже на старте
-(«Database is uninitialized and superuser password is not specified»), и
-дальше `backend` встанет на `depends_on: service_healthy`. Скрипт всегда
-задаёт непустой пароль, так что на практике это не выстрелит, но если
-переменную когда-нибудь сотрут в UI — падение будет не там, где ожидается.
+`SECRET_KEY`. У `POSTGRES_PASSWORD` стоит голая подстановка
+`${POSTGRES_PASSWORD}`: пустое значение не остановит compose, а уронит
+контейнер `db` уже на старте («Database is uninitialized and superuser
+password is not specified»), и дальше `backend` встанет на
+`depends_on: service_healthy`. Скрипт всегда задаёт непустой пароль, так что
+на практике это не выстрелит, но если переменную сотрут в UI — падение будет
+не там, где ожидается.
 
 Мелочь для полноты: `WAHA_INBOUND_WEBHOOK_URL` есть в compose и отсутствует
 в списке ТЗ. Значение по умолчанию пустое, backend в этом случае выводит URL
@@ -140,3 +152,11 @@ sqlite, и данные будут стираться при каждом redepl
 * не назначает домен backend, frontend и waha — WAHA остаётся доступной
   только внутри compose-сети;
 * не трогает файлы репозитория `pppp`.
+
+## Итог
+
+Развёрнуто 07.09.2026. Ресурс `pppp-bot-hub` (uuid `eltkspxrfcj6ceukc4byanmd`)
+в проекте `pppp`, шесть контейнеров, деплой `finished`. Домен висит на
+сервисе `nginx`, сертификат Let's Encrypt выписан, `/health` отвечает 200,
+`styles.css` отдаётся как `text/css`, http редиректит на https, `alembic
+current` — `20260525_0010 (head)`, база postgres.
