@@ -56,8 +56,16 @@ warn() { printf '\033[1;33m[!] %s\033[0m\n' "$*"; }
 ok()   { printf '\033[1;32m[+] %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31m[x] %s\033[0m\n' "$*" >&2; exit 1; }
 
-command -v curl >/dev/null    || die "нет curl."
-command -v python3 >/dev/null || die "нет python3 — он нужен для разбора ответов API."
+command -v curl >/dev/null || die "нет curl."
+
+# В Git Bash под Windows команда называется python, а не python3.
+PY=""
+for c in python3 python py; do
+  if command -v "$c" >/dev/null && "$c" -c 'import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)' 2>/dev/null; then
+    PY="$c"; break
+  fi
+done
+[[ -n "$PY" ]] || die "нет python 3 — он нужен для разбора ответов API."
 
 # --- helpers ---------------------------------------------------------------
 
@@ -82,7 +90,7 @@ api_ok() { [[ "$CODE" =~ ^2 ]]; }
 
 # jget '<python-выражение над d>' — JSON приходит на stdin
 jget() {
-  python3 -c 'import sys, json
+  "$PY" -c 'import sys, json
 try:
     d = json.load(sys.stdin)
 except Exception:
@@ -96,7 +104,7 @@ print("" if v is None else v)' "$1" 2>/dev/null || true
 
 # jfind — uuid элемента массива по полю name
 jfind() {
-  NEEDLE="$1" python3 -c 'import sys, json, os
+  NEEDLE="$1" "$PY" -c 'import sys, json, os
 try:
     d = json.load(sys.stdin)
 except Exception:
@@ -109,7 +117,7 @@ print(next((x.get("uuid", "") for x in d if x.get("name") == n), ""))' 2>/dev/nu
 
 rand_hex() { # rand_hex <байт>
   if command -v openssl >/dev/null; then openssl rand -hex "$1"
-  else python3 -c "import secrets, sys; print(secrets.token_hex(int(sys.argv[1])))" "$1"; fi
+  else "$PY" -c "import secrets, sys; print(secrets.token_hex(int(sys.argv[1])))" "$1"; fi
 }
 
 # --- 0. DNS ----------------------------------------------------------------
@@ -123,6 +131,10 @@ if command -v dig >/dev/null; then
   DNS_IPS=$(dig +short A "$DOMAIN" | grep -E '^[0-9.]+$' || true)
 elif command -v getent >/dev/null; then
   DNS_IPS=$(getent ahostsv4 "$DOMAIN" | awk '{print $1}' | sort -u || true)
+elif command -v nslookup >/dev/null; then
+  # Git Bash: ни dig, ни getent нет, зато есть nslookup из Windows.
+  # Первый Address — адрес самого DNS-сервера, поэтому берём то, что после Name.
+  DNS_IPS=$(nslookup "$DOMAIN" 2>/dev/null | awk '/^Name/{f=1} f && /Address/{print $NF}' | grep -E '^[0-9.]+$' | sort -u || true)
 fi
 if [[ -z "$DNS_IPS" ]]; then
   warn "не удалось разрешить имя — проверь DNS вручную."
@@ -280,7 +292,7 @@ else
     command -v ssh-keygen >/dev/null || die "нет ssh-keygen."
     [[ -f "$KEY_PATH" ]] || ssh-keygen -t ed25519 -a 100 -N '' -f "$KEY_PATH" -C "coolify-deploy-pppp" >/dev/null
     chmod 600 "$KEY_PATH"
-    payload=$(KEY_NAME="$KEY_NAME" PRIV="$(cat "$KEY_PATH")" python3 -c '
+    payload=$(KEY_NAME="$KEY_NAME" PRIV="$(cat "$KEY_PATH")" "$PY" -c '
 import json, os
 print(json.dumps({
     "name": os.environ["KEY_NAME"],
@@ -303,7 +315,7 @@ PROJECT_UUID=$(printf '%s' "$RESP" | jfind "$PROJECT_NAME")
 if [[ -n "$PROJECT_UUID" ]]; then
   ok "Уже есть (${PROJECT_UUID})"
 else
-  payload=$(PROJECT_NAME="$PROJECT_NAME" python3 -c '
+  payload=$(PROJECT_NAME="$PROJECT_NAME" "$PY" -c '
 import json, os
 print(json.dumps({"name": os.environ["PROJECT_NAME"], "description": "PPPP Bot Hub, создан scripts/07-deploy-pppp.sh"}))')
   api POST /projects "$payload"
@@ -315,7 +327,7 @@ fi
 api GET "/projects/${PROJECT_UUID}"
 ENVIRONMENT_UUID=""
 if api_ok; then
-  ENVIRONMENT_UUID=$(ENV_NAME="$ENVIRONMENT_NAME" python3 -c '
+  ENVIRONMENT_UUID=$(ENV_NAME="$ENVIRONMENT_NAME" "$PY" -c '
 import sys, json, os
 try:
     d = json.load(sys.stdin)
@@ -367,14 +379,14 @@ WEBHOOK_SECRET=""
 
 # Домен вешается только на сервис nginx: он внутренний edge и сам роутит пути.
 # backend/frontend/waha домена не получают — WAHA обязана остаться внутри сети.
-compose_domains_json=$(DOMAIN="$DOMAIN" WEB_SERVICE="$WEB_SERVICE" python3 -c '
+compose_domains_json=$(DOMAIN="$DOMAIN" WEB_SERVICE="$WEB_SERVICE" "$PY" -c '
 import json, os
 print(json.dumps([{"name": os.environ["WEB_SERVICE"], "domain": "https://" + os.environ["DOMAIN"]}]))')
 
 if [[ -n "$APP_UUID" ]]; then
   ok "Уже есть (${APP_UUID}) — привожу настройки к нужным и обновляю переменные."
   payload=$(DOMAIN="$DOMAIN" WEB_SERVICE="$WEB_SERVICE" COMPOSE_LOCATION="$COMPOSE_LOCATION" \
-    GIT_BRANCH="$GIT_BRANCH" python3 -c '
+    GIT_BRANCH="$GIT_BRANCH" "$PY" -c '
 import json, os
 e = os.environ
 print(json.dumps({
@@ -397,7 +409,7 @@ else
     GIT_REPO="$GIT_REPO" GIT_REPO_SSH="$GIT_REPO_SSH" GIT_BRANCH="$GIT_BRANCH" \
     APP_NAME="$APP_NAME" DOMAIN="$DOMAIN" WEB_SERVICE="$WEB_SERVICE" \
     COMPOSE_LOCATION="$COMPOSE_LOCATION" WEBHOOK_SECRET="$WEBHOOK_SECRET" \
-    PORTS="${1:-}" python3 -c '
+    PORTS="${1:-}" "$PY" -c '
 import json, os
 e = os.environ
 b = {
@@ -456,7 +468,7 @@ fi
 say "Переменные окружения"
 set_env() { # set_env KEY VALUE
   local payload
-  payload=$(K="$1" V="$2" python3 -c '
+  payload=$(K="$1" V="$2" "$PY" -c '
 import json, os
 print(json.dumps({"key": os.environ["K"], "value": os.environ["V"], "is_preview": False}))')
   api POST "/applications/${APP_UUID}/envs" "$payload"
@@ -515,7 +527,7 @@ set_env WA_QR_HEALTHCHECK_FAILED_THRESHOLD_MINUTES "5"
 say "Кому достался домен"
 api GET "/applications/${APP_UUID}"
 if api_ok; then
-  printf '%s' "$RESP" | python3 -c '
+  printf '%s' "$RESP" | "$PY" -c '
 import sys, json
 try:
     d = json.load(sys.stdin)
@@ -534,7 +546,7 @@ for i in items:
     print("    %-10s %s" % (i.get("name", "?"), i.get("domain", "")))
 print("    fqdn (общий):", d.get("fqdn") or "<пусто>")
 ' || true
-  BAD=$(printf '%s' "$RESP" | WEB_SERVICE="$WEB_SERVICE" python3 -c '
+  BAD=$(printf '%s' "$RESP" | WEB_SERVICE="$WEB_SERVICE" "$PY" -c '
 import sys, json, os
 try:
     d = json.load(sys.stdin)
