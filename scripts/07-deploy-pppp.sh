@@ -293,7 +293,10 @@ try:
 except Exception:
     print(""); raise SystemExit
 items = d if isinstance(d, list) else (d.get("data") or [])
-usable = [x for x in items if isinstance(x, dict) and x.get("app_id") and x.get("installation_id")]
+# Признак настоящего приложения — заполненный app_id. installation_id в
+# списке есть не всегда, поэтому он лишь повышает приоритет, а не отсекает.
+usable = [x for x in items if isinstance(x, dict) and x.get("app_id")]
+usable.sort(key=lambda x: 0 if x.get("installation_id") else 1)
 print(usable[0]["uuid"] if usable else "")' 2>/dev/null || true)
   fi
 fi
