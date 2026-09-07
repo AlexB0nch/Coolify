@@ -281,7 +281,20 @@ if [[ "$SOURCE" == "deploy-key" ]]; then
 elif [[ -z "$GITHUB_APP_UUID" ]]; then
   api GET /github-apps
   if api_ok; then
-    GITHUB_APP_UUID=$(printf '%s' "$RESP" | jget '(d[0]["uuid"] if isinstance(d, list) and d else (d.get("data") or [{}])[0].get("uuid",""))')
+    # В списке всегда лежит встроенный источник "Public GitHub": у него нет ни
+    # app_id, ни ключа, и приватный репозиторий он отдать не может. Попытка
+    # выпустить для него installation-токен роняет API пятисоткой
+    # (Attempt to read property "private_key" on null). Берём только настоящее
+    # приложение — с app_id и installation_id.
+    GITHUB_APP_UUID=$(printf '%s' "$RESP" | "$PY" -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(""); raise SystemExit
+items = d if isinstance(d, list) else (d.get("data") or [])
+usable = [x for x in items if isinstance(x, dict) and x.get("app_id") and x.get("installation_id")]
+print(usable[0]["uuid"] if usable else "")' 2>/dev/null || true)
   fi
 fi
 if [[ -n "$GITHUB_APP_UUID" ]]; then
@@ -289,13 +302,16 @@ if [[ -n "$GITHUB_APP_UUID" ]]; then
   ok "GitHub App: ${GITHUB_APP_UUID}"
 else
   SOURCE_MODE="deploy-key"
-  warn "GitHub App не подключён — иду через ключ на чтение."
+  warn "Настоящего GitHub App в панели нет (встроенный 'Public GitHub' не в счёт:"
+  warn "приватный репозиторий он не отдаст). Иду через ключ на чтение."
   api GET /security/keys
   api_ok || die "не удалось получить список ключей: ${CODE} ${RESP}"
   KEY_UUID=$(printf '%s' "$RESP" | jfind "$KEY_NAME")
+  KEY_JUST_CREATED=0
   if [[ -n "$KEY_UUID" ]]; then
     ok "Ключ '${KEY_NAME}' уже в Coolify (${KEY_UUID})"
   else
+    KEY_JUST_CREATED=1
     command -v ssh-keygen >/dev/null || die "нет ssh-keygen."
     [[ -f "$KEY_PATH" ]] || ssh-keygen -t ed25519 -a 100 -N '' -f "$KEY_PATH" -C "coolify-deploy-pppp" >/dev/null
     chmod 600 "$KEY_PATH"
@@ -631,6 +647,13 @@ print(",".join(x for x in bad if x))' 2>/dev/null || true)
 fi
 
 # --- 8. деплой -------------------------------------------------------------
+
+if [[ "$DEPLOY" == "1" && "${KEY_JUST_CREATED:-0}" == "1" ]]; then
+  warn "Ключ на чтение создан только что и в GitHub его ещё нет — деплой сейчас"
+  warn "упадёт на git clone. Добавь ключ и вебхук (напечатаны ниже) и запусти"
+  warn "скрипт ещё раз: он подхватит созданное и задеплоит."
+  DEPLOY=0
+fi
 
 if [[ "$DEPLOY" != "1" ]]; then
   warn "DEPLOY=0 — деплой не запускаю."
