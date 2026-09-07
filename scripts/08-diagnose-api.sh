@@ -100,11 +100,29 @@ echo "    проект: ${PROJECT_UUID}"
 
 say "GitHub App"
 api GET /github-apps
-echo "    список (${CODE}): $(short "$RESP")"
+if api_ok; then
+  # Печатаем карточки целиком: по ним видно, какое приложение настоящее
+  # (непустой app_id) и какой installation_id панель держит у себя. Именно
+  # installation_id определяет, какие репозитории отдаст installation-токен.
+  printf '%s' "$RESP" | "$PY" -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit
+items = d if isinstance(d, list) else (d.get("data") or [])
+for x in items:
+    if not isinstance(x, dict):
+        continue
+    print("    ---")
+    for k in ("name", "uuid", "id", "app_id", "installation_id", "html_url", "api_url", "organization"):
+        if k in x:
+            print("      %-16s %s" % (k, x.get(k)))' || true
+else
+  warn "список не отдался (${CODE}): $(short "$RESP")"
+fi
+
 if [[ -z "$GITHUB_APP_UUID" ]]; then
-  # Встроенный "Public GitHub" не в счёт: у него нет ни app_id, ни ключа, и
-  # выпуск installation-токена для него роняет API пятисоткой. Берём настоящее
-  # приложение — с заполненным app_id.
   GITHUB_APP_UUID=$(printf '%s' "$RESP" | "$PY" -c '
 import sys, json
 try:
@@ -117,32 +135,31 @@ usable.sort(key=lambda x: 0 if x.get("installation_id") else 1)
 print(usable[0]["uuid"] if usable else "")' 2>/dev/null || true)
 fi
 
-GH_OK=0
 if [[ -z "$GITHUB_APP_UUID" ]]; then
   warn "Настоящего GitHub App нет, только встроенный Public GitHub."
   warn "Остаётся путь через ключ на чтение: SOURCE=deploy-key в 07-deploy-pppp.sh."
 else
-  echo "    uuid: ${GITHUB_APP_UUID}"
-  api GET "/github-apps/${GITHUB_APP_UUID}/repositories"
-  if api_ok; then
-    ok "репозитории отдаются — токен установки выпускается"
-    printf '%s' "$RESP" | "$PY" -c 'import sys, json
-try: d = json.load(sys.stdin)
-except Exception: raise SystemExit
-items = d.get("repositories") if isinstance(d, dict) else d
-items = items or []
-names = [i.get("full_name") or i.get("name") for i in items if isinstance(i, dict)]
-print("    видит репозиториев:", len(names))
-hit = [n for n in names if n and n.lower().endswith("/pppp")]
-print("    pppp среди них:", hit or "НЕТ — приложение не установлено на этот репозиторий")' || true
-    GH_OK=1
+  ok "выбрано приложение: ${GITHUB_APP_UUID}"
+  # /github-apps/{id}/repositories принимает ЧИСЛОВОЙ id, не uuid: с uuid
+  # запрос падает в базе (invalid input syntax for type bigint).
+  GH_NUM_ID=$(printf '%s' "$RESP" | NEEDLE="$GITHUB_APP_UUID" "$PY" -c '
+import sys, json, os
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(""); raise SystemExit
+items = d if isinstance(d, list) else (d.get("data") or [])
+hit = next((x for x in items if isinstance(x, dict) and x.get("uuid") == os.environ["NEEDLE"]), None)
+v = (hit or {}).get("id")
+print(v if isinstance(v, int) and v > 0 else "")' 2>/dev/null || true)
+  if [[ -n "$GH_NUM_ID" ]]; then
+    api GET "/github-apps/${GH_NUM_ID}/repositories"
+    echo "    репозитории (${CODE}): $(short "$RESP")"
   else
-    warn "репозитории не отдаются (${CODE}): $(short "$RESP")"
-    warn "Это и есть причина 500: Coolify не может работать с этим GitHub App."
+    warn "числовой id приложения в ответе не отдан — список репозиториев через"
+    warn "API не проверить. Смотри на installation_id выше и сверь его с GitHub:"
+    warn "Settings → Applications → Installed GitHub Apps → Configure, число в URL."
   fi
-
-  api GET "/github-apps/${GITHUB_APP_UUID}/repositories/${GIT_REPO%%/*}/${GIT_REPO#*/}/branches"
-  echo "    ветки ${GIT_REPO} (${CODE}): $(short "$RESP")"
 fi
 
 # --- 2. лесенка тел запроса -------------------------------------------------
