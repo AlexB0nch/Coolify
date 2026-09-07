@@ -46,6 +46,7 @@ KEY_NAME="${KEY_NAME:-deploy-${APP_NAME}}"
 KEY_PATH="${KEY_PATH:-$HOME/.ssh/coolify_deploy_pppp}"
 SERVER_UUID="${SERVER_UUID:-}"
 GITHUB_APP_UUID="${GITHUB_APP_UUID:-}"
+SOURCE="${SOURCE:-auto}"                        # auto | github-app | deploy-key
 SSH_HOST="${SSH_HOST:-coolify}"                 # алиас из scripts/01-local-keys.sh
 DEPLOY="${DEPLOY:-1}"
 WAIT_SECONDS="${WAIT_SECONDS:-900}"
@@ -273,7 +274,11 @@ fi
 
 say "Источник для приватного репозитория"
 SOURCE_MODE=""
-if [[ -z "$GITHUB_APP_UUID" ]]; then
+if [[ "$SOURCE" == "deploy-key" ]]; then
+  # Принудительно, в обход GitHub App: например, когда панель не может выпустить
+  # для него installation-токен и отвечает 500 на создание любого приложения.
+  GITHUB_APP_UUID=""
+elif [[ -z "$GITHUB_APP_UUID" ]]; then
   api GET /github-apps
   if api_ok; then
     GITHUB_APP_UUID=$(printf '%s' "$RESP" | jget '(d[0]["uuid"] if isinstance(d, list) and d else (d.get("data") or [{}])[0].get("uuid",""))')
