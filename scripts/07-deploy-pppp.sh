@@ -249,6 +249,8 @@ say "Проверяю токен на ${API}"
 api GET /teams/current
 api_ok || die "API ответил ${CODE}. Проверь URL панели и токен. Ответ: ${RESP}"
 ok "Токен рабочий, команда: $(printf '%s' "$RESP" | jget 'd.get("name","?")')"
+api GET /version
+api_ok && ok "Версия Coolify: ${RESP}"
 
 # --- 1. сервер -------------------------------------------------------------
 
@@ -402,14 +404,20 @@ print(json.dumps({
   api_ok || warn "не удалось обновить настройки (${CODE}): ${RESP}"
 else
   WEBHOOK_SECRET="$(rand_hex 16)"
-  build_payload() { # build_payload [ports_exposes]
+  # build_payload <with_domains> <with_network> [ports_exposes]
+  # Старые сборки Coolify отвечают 500 на docker_compose_domains при создании:
+  # сервисов компоуза они ещё не знают, файл будет распарсен позже
+  # (LoadComposeFile). Поэтому есть откат: создать ресурс без доменов и без
+  # предопределённой сети, дождаться разбора compose и дослать это через PATCH.
+  build_payload() {
+    WITH_DOMAINS="$1" WITH_NETWORK="$2" \
     PROJECT_UUID="$PROJECT_UUID" SERVER_UUID="$SERVER_UUID" \
     ENVIRONMENT_NAME="$ENVIRONMENT_NAME" ENVIRONMENT_UUID="$ENVIRONMENT_UUID" \
     SOURCE_MODE="$SOURCE_MODE" GITHUB_APP_UUID="${GITHUB_APP_UUID:-}" KEY_UUID="${KEY_UUID:-}" \
     GIT_REPO="$GIT_REPO" GIT_REPO_SSH="$GIT_REPO_SSH" GIT_BRANCH="$GIT_BRANCH" \
     APP_NAME="$APP_NAME" DOMAIN="$DOMAIN" WEB_SERVICE="$WEB_SERVICE" \
     COMPOSE_LOCATION="$COMPOSE_LOCATION" WEBHOOK_SECRET="$WEBHOOK_SECRET" \
-    PORTS="${1:-}" "$PY" -c '
+    PORTS="${3:-}" "$PY" -c '
 import json, os
 e = os.environ
 b = {
@@ -419,16 +427,18 @@ b = {
     "git_branch": e["GIT_BRANCH"],
     "build_pack": "dockercompose",
     "docker_compose_location": e["COMPOSE_LOCATION"],
-    # домен — только сервису nginx, порт 80; TLS терминирует Traefik
-    "docker_compose_domains": [{"name": e["WEB_SERVICE"], "domain": "https://" + e["DOMAIN"]}],
     "name": e["APP_NAME"],
     "description": "PPPP Bot Hub: nginx + frontend + backend + db + redis + waha",
     "is_auto_deploy_enabled": True,
     "is_force_https_enabled": True,
-    # контейнеры подключаются к общей сети coolify, где живёт прокси
-    "connect_to_docker_network": True,
     "instant_deploy": False,
 }
+if e["WITH_DOMAINS"] == "1":
+    # домен — только сервису nginx, порт 80; TLS терминирует Traefik
+    b["docker_compose_domains"] = [{"name": e["WEB_SERVICE"], "domain": "https://" + e["DOMAIN"]}]
+if e["WITH_NETWORK"] == "1":
+    # контейнеры подключаются к общей сети coolify, где живёт прокси
+    b["connect_to_docker_network"] = True
 if e["SOURCE_MODE"] == "github-app":
     b["github_app_uuid"] = e["GITHUB_APP_UUID"]
     b["git_repository"] = e["GIT_REPO"]
@@ -449,15 +459,59 @@ print(json.dumps(b))'
     ENDPOINT=/applications/private-deploy-key
   fi
 
-  api POST "$ENDPOINT" "$(build_payload)"
+  # Попытки от полной к самой скромной. NEEDS_PATCH=1 значит, что домен и сеть
+  # ресурс при создании не принял и их надо дослать после разбора compose.
+  NEEDS_PATCH=0
+  api POST "$ENDPOINT" "$(build_payload 1 1)"
+
   if ! api_ok && grep -qi 'ports_exposes' <<<"$RESP"; then
     warn "API требует ports_exposes. Повторяю с 80 — наружу порт всё равно не"
     warn "публикуется (это делает ports_mappings), в compose только expose."
-    api POST "$ENDPOINT" "$(build_payload 80)"
+    api POST "$ENDPOINT" "$(build_payload 1 1 80)"
   fi
+
+  if ! api_ok; then
+    warn "Создание с доменом и предопределённой сетью не прошло (${CODE}):"
+    printf '%s\n' "$RESP" | head -5
+    warn "Пробую без них — домен назначу отдельным запросом, когда Coolify"
+    warn "разберёт compose-файл и узнает про сервис ${WEB_SERVICE}."
+    NEEDS_PATCH=1
+    api POST "$ENDPOINT" "$(build_payload 0 0)"
+    if ! api_ok && grep -qi 'ports_exposes' <<<"$RESP"; then
+      api POST "$ENDPOINT" "$(build_payload 0 0 80)"
+    fi
+  fi
+
   api_ok || die "не удалось создать ресурс: ${CODE} ${RESP}"
   APP_UUID=$(printf '%s' "$RESP" | jget 'd["uuid"]')
   ok "Создан (${APP_UUID})"
+
+  if [[ "$NEEDS_PATCH" == "1" ]]; then
+    say "Досылаю домен и предопределённую сеть"
+    # LoadComposeFile ставится в очередь при создании; дать ему дочитать файл
+    sleep 15
+    patch_payload() { # patch_payload <with_network>
+      WITH_NETWORK="$1" DOMAIN="$DOMAIN" WEB_SERVICE="$WEB_SERVICE" "$PY" -c '
+import json, os
+e = os.environ
+b = {"docker_compose_domains": [{"name": e["WEB_SERVICE"], "domain": "https://" + e["DOMAIN"]}]}
+if e["WITH_NETWORK"] == "1":
+    b["connect_to_docker_network"] = True
+print(json.dumps(b))'
+    }
+    api PATCH "/applications/${APP_UUID}" "$(patch_payload 1)"
+    if ! api_ok; then
+      warn "с предопределённой сетью не прошло (${CODE}) — повторяю только с доменом"
+      api PATCH "/applications/${APP_UUID}" "$(patch_payload 0)"
+    fi
+    if api_ok; then
+      ok "Домен назначен"
+    else
+      warn "не удалось назначить домен через API (${CODE}): ${RESP}"
+      warn "Сделай это в панели: ресурс → Configuration → Domains → у сервиса"
+      warn "${WEB_SERVICE} вписать https://${DOMAIN}, у остальных оставить пусто."
+    fi
+  fi
 fi
 
 # --- 6. переменные окружения -----------------------------------------------
