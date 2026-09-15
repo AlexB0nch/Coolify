@@ -157,6 +157,26 @@ LEFT JOIN LATERAL (SELECT * FROM scheduled_database_backup_executions e
 ORDER BY x.created_at NULLS FIRST;" | sed 's/|/ | /g'
 warn "Свежий success — единственное доказательство, что бэкап живой. Включённое расписание может падать месяцами."
 
+hr "Подозрительные бэкапы: размер не меняется или дамп почти пустой"
+q "$ALL_DB
+SELECT COALESCE(db.name,'?') AS database, count(*) AS runs,
+       min(e.size) AS min_size, max(e.size) AS max_size,
+       CASE WHEN max(nullif(regexp_replace(e.size,'[^0-9]','','g'),'')::bigint) < 5000
+              THEN 'дамп почти пустой'
+            ELSE 'размер не меняется ни на байт' END AS why
+FROM scheduled_database_backups b
+LEFT JOIN db ON db.id=b.database_id AND db.t=b.database_type
+JOIN scheduled_database_backup_executions e
+  ON e.scheduled_database_backup_id=b.id AND e.status='success'
+WHERE e.created_at > now() - interval '30 days'
+  AND e.size ~ '^[0-9]+$'
+GROUP BY db.name
+HAVING count(*) >= 3
+   AND (count(DISTINCT e.size) = 1
+        OR max(nullif(regexp_replace(e.size,'[^0-9]','','g'),'')::bigint) < 5000)
+ORDER BY 1;" | sed 's/|/ | /g'
+warn "Живая база меняется, и дамп меняется вместе с ней. Одинаковый размер день за днём означает, что дампится не то: пустая база или не та база внутри инстанса."
+
 hr "Провалившиеся запуски за последние 14 дней"
 q "SELECT to_char(e.created_at,'MM-DD HH24:MI') AS at, e.scheduled_database_backup_id AS backup_id,
          e.status, left(COALESCE(e.message,''),120) AS message
