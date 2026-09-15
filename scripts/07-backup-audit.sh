@@ -219,6 +219,12 @@ q "SELECT v.name AS volume, COALESCE(x.status,'не запускался НИ Р
   ORDER BY x.created_at NULLS FIRST;" | sed 's/|/ | /g'
 fi
 
+hr "Размер томов — сколько места займут их бэкапы"
+for m in /var/lib/docker/volumes/*/_data; do
+  v=${m%/_data}; v=${v##*/}
+  [[ -d $m ]] && du -sh "$m" 2>/dev/null | awk -v n="$v" '{printf "%-8s %s\n", $1, n}'
+done | sort -rh | head -20
+
 hr "Локальные копии бэкапов на диске"
 du -sh /data/coolify/backups 2>/dev/null || echo "каталога /data/coolify/backups нет"
 find /data/coolify/backups -type f -printf '%TY-%Tm-%Td %10s  %p\n' 2>/dev/null | sort | tail -25
