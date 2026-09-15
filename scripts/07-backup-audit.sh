@@ -45,6 +45,8 @@ col() { # col <таблица> <колонка> <чем заменить, есл
            WHERE table_name='$1' AND column_name='$2' LIMIT 1;") == 1 ]] \
     && echo "$2" || echo "$3"
 }
+has_table() { [[ $(qv "SELECT 1 FROM information_schema.tables
+                       WHERE table_name='$1' LIMIT 1;") == 1 ]]; }
 KEEP_LOCAL=$(col scheduled_database_backups database_backup_retention_amount_locally \
              "$(col scheduled_database_backups number_of_backups_locally "'n/a'")")
 NO_LOCAL=$(col scheduled_database_backups disable_local_backup false)
@@ -68,7 +70,20 @@ db AS (
   SELECT d.*, e.name AS env, p.name AS project
   FROM d LEFT JOIN environments e ON e.id=d.environment_id
          LEFT JOIN projects p ON p.id=e.project_id
+),
+res AS (
+  SELECT id, t AS rtype, name, kind, environment_id FROM d
+  UNION ALL SELECT id,'App\\Models\\Application',name,'app',environment_id FROM applications
+  UNION ALL SELECT id,'App\\Models\\Service',name,'service',environment_id FROM services
+),
+resp AS (
+  SELECT res.*, p.name AS project
+  FROM res LEFT JOIN environments e ON e.id=res.environment_id
+           LEFT JOIN projects p ON p.id=e.project_id
 )"
+
+hr "Версия Coolify"
+docker inspect --format '{{.Config.Image}}' coolify 2>/dev/null || echo "контейнер coolify не найден"
 
 hr "S3-хранилища (Settings → S3 Storages)"
 q "SELECT id, name, bucket, endpoint, region, is_usable FROM s3_storages ORDER BY id;" | sed 's/|/ | /g'
@@ -162,11 +177,47 @@ q "SELECT b.enabled, b.frequency, b.save_s3 AS to_s3, COALESCE(s.name,'—') AS 
          WHERE d.name='coolify-db';") == 0 ]] && \
   warn "База Coolify не бэкапится: потеряешь сами описания проектов, домены и переменные окружения."
 
-hr "Тома приложений и сервисов — Coolify их НЕ бэкапит"
-q "SELECT v.resource_type AS owner_type, v.name, v.mount_path,
-          COALESCE(v.host_path,'(docker volume)') AS host_path
-   FROM local_persistent_volumes v ORDER BY 1,2;" | sed 's/|/ | /g'
-warn "Всё из этого списка (загрузки, картинки, конфиги) при потере диска не восстановится — нужен отдельный restic/rclone."
+hr "Тома: кому принадлежат и есть ли у них бэкап"
+if has_table scheduled_volume_backups; then
+  q "$ALL_DB
+  SELECT COALESCE(r.project,'—') AS project, COALESCE(r.name,'ОСИРОТЕВШИЙ ТОМ') AS owner,
+         COALESCE(r.kind,'?') AS kind, v.name AS volume, v.mount_path,
+         CASE WHEN vb.id IS NULL THEN 'НЕТ' ELSE
+              (CASE WHEN vb.enabled AND vb.save_s3 THEN 'да, в S3'
+                    WHEN vb.enabled THEN 'да, только локально'
+                    ELSE 'есть, но выключен' END) END AS backup
+  FROM local_persistent_volumes v
+  LEFT JOIN resp r ON r.id=v.resource_id AND r.rtype=v.resource_type
+  LEFT JOIN scheduled_volume_backups vb
+         ON vb.backupable_id=v.id
+        AND vb.backupable_type='App\\Models\\LocalPersistentVolume'
+  ORDER BY 1,2,4;" | sed 's/|/ | /g'
+else
+  q "$ALL_DB
+  SELECT COALESCE(r.project,'—') AS project, COALESCE(r.name,'ОСИРОТЕВШИЙ ТОМ') AS owner,
+         COALESCE(r.kind,'?') AS kind, v.name AS volume, v.mount_path
+  FROM local_persistent_volumes v
+  LEFT JOIN resp r ON r.id=v.resource_id AND r.rtype=v.resource_type
+  ORDER BY 1,2,4;" | sed 's/|/ | /g'
+  warn "Эта версия Coolify не умеет бэкапить тома (фича появилась в 2026.07): ни один том не покрыт, нужен restic/rclone на хосте."
+fi
+warn "Том с backup = НЕТ при потере диска не восстановится: там загрузки, картинки, сессии и базы приложений, поднятых своим compose."
+
+if has_table scheduled_volume_backup_executions; then
+hr "Последний запуск бэкапов томов"
+q "SELECT v.name AS volume, COALESCE(x.status,'не запускался НИ РАЗУ') AS status,
+         to_char(x.created_at,'YYYY-MM-DD HH24:MI') AS last_run,
+         COALESCE(s.name,'—') AS s3_target, COALESCE(x.size::text,'—') AS size
+  FROM scheduled_volume_backups vb
+  LEFT JOIN local_persistent_volumes v
+         ON v.id=vb.backupable_id
+        AND vb.backupable_type='App\\Models\\LocalPersistentVolume'
+  LEFT JOIN s3_storages s ON s.id=vb.s3_storage_id
+  LEFT JOIN LATERAL (SELECT * FROM scheduled_volume_backup_executions e
+                     WHERE e.scheduled_volume_backup_id=vb.id
+                     ORDER BY e.created_at DESC LIMIT 1) x ON TRUE
+  ORDER BY x.created_at NULLS FIRST;" | sed 's/|/ | /g'
+fi
 
 hr "Локальные копии бэкапов на диске"
 du -sh /data/coolify/backups 2>/dev/null || echo "каталога /data/coolify/backups нет"
