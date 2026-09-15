@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
-# Аудит бэкапов. Запускается НА СЕРВЕРЕ:
+# Аудит бэкапов. Запускается НА СЕРВЕРЕ, двумя способами.
+#
+# Со своего компьютера, где лежит этот репозиторий:
 #   ssh coolify 'bash -s' < scripts/07-backup-audit.sh
+#
+# Уже находясь на сервере (терминал Coolify, консоль хостера, обычный ssh) —
+# обёртка ssh не нужна, скрипт скачивается с GitHub:
+#   curl -fsSL -o /root/backup-audit.sh https://raw.githubusercontent.com/AlexB0nch/Coolify/claude/beautiful-galileo-cbjkbe/scripts/07-backup-audit.sh
+#   bash /root/backup-audit.sh
 #
 # Ничего не меняет — только читает базу самой панели. Отвечает на вопросы:
 #   1) какие S3-хранилища заведены и рабочие ли они;

@@ -290,6 +290,15 @@ Coolify управляет собственным хостом по SSH под r
 ssh coolify 'bash -s' < scripts/07-backup-audit.sh
 ```
 
+Если ты уже на сервере — в терминале Coolify, в консоли хостера или просто по
+ssh, — обёртка `ssh coolify '...'` не нужна и репозитория там нет. Скачай скрипт
+с GitHub и запусти:
+
+```bash
+curl -fsSL -o /root/backup-audit.sh https://raw.githubusercontent.com/AlexB0nch/Coolify/claude/beautiful-galileo-cbjkbe/scripts/07-backup-audit.sh
+bash /root/backup-audit.sh
+```
+
 Скрипт только читает базу Coolify и показывает базы без расписания, бэкапы,
 которые лежат на том же диске вместо S3, провалившиеся запуски и тома
 приложений — последние Coolify не бэкапит вообще, это отдельная забота.
