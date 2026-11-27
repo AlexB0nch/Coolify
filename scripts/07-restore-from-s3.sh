@@ -21,7 +21,10 @@
 #   S3_PREFIX        где искать внутри бакета (по умолчанию — весь бакет)
 #   S3_REGION        регион, по умолчанию us-east-1
 #   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY  ключи S3
-#   S3_KEY           конкретный объект; по умолчанию берётся самый свежий *.dmp
+#   S3_KEY           конкретный объект; по умолчанию берётся самый свежий
+#                    pg-dump-coolify-*.dmp из backups/coolify/
+#   LIST_ONLY=1      только показать бэкапы в бакете и сохранить список в
+#                    /data/coolify/backups/restore/s3-listing.txt, ничего не менять
 #   OLD_APP_KEY      APP_KEY старого Coolify (base64:...)
 #   COOLIFY_VERSION  версия для повторного запуска установщика; по умолчанию
 #                    та, что сейчас стоит
@@ -74,12 +77,32 @@ else
        amazon/aws-cli)
   [[ -n "${S3_ENDPOINT:-}" ]] && AWS+=(--endpoint-url "$S3_ENDPOINT")
 
+  # LIST_ONLY=1: только посмотреть содержимое бакета. Список (без ключей)
+  # сохраняется в файл, ничего не скачивается и не меняется.
+  if [[ "${LIST_ONLY:-0}" == "1" ]]; then
+    OUT="$WORK/s3-listing.txt"
+    "${AWS[@]}" s3 ls --recursive "s3://$S3_BUCKET/${S3_PREFIX:-}" > "$OUT" \
+      || die "Не смог прочитать бакет — проверь endpoint, бакет и ключи."
+    chmod 600 "$OUT"
+    say "Объектов: $(wc -l < "$OUT"), список сохранён в $OUT"
+    say "Бэкапы самого Coolify (последние 5):"
+    grep -E '(^|/)backups/coolify/|pg-dump-coolify-' "$OUT" | sort -k1,2 | tail -5 | sed 's/^/    /'
+    say "Бэкапы баз проектов (последние 10):"
+    grep -E '(^|/)backups/databases/' "$OUT" | sort -k1,2 | tail -10 | sed 's/^/    /'
+    exit 0
+  fi
+
   if [[ -z "${S3_KEY:-}" ]]; then
     say "Ищу самый свежий *.dmp в s3://$S3_BUCKET/${S3_PREFIX:-}"
     LISTING=$("${AWS[@]}" s3 ls --recursive "s3://$S3_BUCKET/${S3_PREFIX:-}") \
       || die "Не смог прочитать бакет — проверь endpoint, бакет и ключи."
-    # формат строки: ДАТА ВРЕМЯ РАЗМЕР КЛЮЧ; coolify-дампы предпочтительнее
-    S3_KEY=$(printf '%s\n' "$LISTING" | grep -E '\.dmp$' | grep -i 'coolify' \
+    # формат строки: ДАТА ВРЕМЯ РАЗМЕР КЛЮЧ. Coolify кладёт в S3 все бэкапы под
+    # data/coolify/backups/..., так что слово coolify есть в каждом ключе.
+    # Дамп самой панели — это backups/coolify/coolify-db-*/pg-dump-coolify-*.dmp,
+    # базы проектов лежат в backups/databases/ и сюда попасть не должны.
+    S3_KEY=$(printf '%s\n' "$LISTING" | grep -E '\.dmp$' \
+             | grep -E '(^|/)backups/coolify/|(^|/)pg-dump-coolify-[^/]*$' \
+             | grep -v '/backups/databases/' \
              | sort -k1,2 | tail -1 | awk '{ $1=$2=$3=""; sub(/^ +/,""); print }')
     if [[ -z "$S3_KEY" ]]; then
       printf '%s\n' "$LISTING" | tail -30
@@ -113,6 +136,8 @@ cp -a "$ENV_FILE" "$ENV_FILE.before-restore-$STAMP"
 say "Копия текущего .env: $ENV_FILE.before-restore-$STAMP"
 docker exec coolify-db pg_dump --format=custom --no-acl --no-owner -U coolify coolify \
   > "$WORK/fresh-install-$STAMP.dmp"
+chmod 600 "$WORK/fresh-install-$STAMP.dmp"
+[[ -s "$WORK/fresh-install-$STAMP.dmp" ]] || die "Копия БД свежей установки пустая — дальше без отката не иду."
 say "Копия БД свежей установки (для отката): $WORK/fresh-install-$STAMP.dmp"
 
 # --- 3. restore ------------------------------------------------------------------
@@ -129,11 +154,22 @@ else
 fi
 say "APP_KEY в $ENV_FILE заменён на старый"
 
+# Дамп старой версии восстанавливаем в ПУСТУЮ схему, а не через --clean поверх
+# свежей: в новой версии есть таблицы, которых нет в дампе, и их внешние ключи
+# не дают --clean удалить старые таблицы — pg_restore падает на полпути.
+# Затирается только БД свежей установки, её копия снята выше.
+say "Очищаю схему public свежей установки (копия: fresh-install-$STAMP.dmp)"
+docker exec coolify-db psql -v ON_ERROR_STOP=1 -q -U coolify -d coolify \
+  -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;' \
+  || die "Не смог очистить схему. Контейнеры остановлены, .env уже со старым APP_KEY —
+   верни $ENV_FILE.before-restore-$STAMP и запусти установщик."
+
 say "pg_restore в coolify-db"
-docker exec -i coolify-db pg_restore --clean --if-exists --exit-on-error \
+docker exec -i coolify-db pg_restore --exit-on-error \
   --no-acl --no-owner --username=coolify --dbname=coolify < "$BACKUP_FILE" \
   || die "pg_restore упал. Контейнеры оставлены остановленными. Откат: верни
-   $ENV_FILE.before-restore-$STAMP и восстанови $WORK/fresh-install-$STAMP.dmp той же командой."
+   $ENV_FILE.before-restore-$STAMP, снова очисти схему (DROP SCHEMA public CASCADE;
+   CREATE SCHEMA public;) и восстанови $WORK/fresh-install-$STAMP.dmp той же командой."
 
 # --- 4. установщик: поднимает контейнеры и прогоняет миграции -------------------
 AK=/root/.ssh/authorized_keys
@@ -180,7 +216,32 @@ else
   warn "Если панель пишет про 'MAC is invalid' — APP_KEY не тот."
 fi
 
-IP=$(curl -fsS -m 5 https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
+# --- 6. сети назначений (destinations) из восстановленной БД -------------------
+# На старом сервере эти docker-сети были, на новом их нет. Пока сеть не
+# создана, базы, привязанные к ней (например, база рядом с compose-приложением),
+# не стартуют: "network <uuid> declared as external, but could not be found".
+say "Создаю docker-сети назначений из восстановленной БД"
+docker exec coolify-db psql -U coolify -d coolify -tAc \
+  "select network from standalone_dockers where server_id = 0" 2>/dev/null \
+  | while IFS= read -r net; do
+      [[ -z "$net" ]] && continue
+      if docker network inspect "$net" >/dev/null 2>&1; then
+        echo "    $net — уже есть"
+      else
+        docker network create --attachable "$net" >/dev/null && echo "    $net — создана"
+      fi
+    done
+
+# --- 7. динамический конфиг прокси для домена самой панели ----------------------
+# /data/coolify/proxy/dynamic/coolify.yaml жил на старом диске. Без него
+# https://coolify.<домен> отдаёт 503, хотя панель по :8000 работает.
+say "Генерирую конфиг Traefik для домена панели"
+docker exec coolify php artisan tinker --execute='\App\Models\Server::find(0)->setupDynamicProxyConfiguration(); echo "ok";' \
+  >/dev/null 2>&1 || warn "Не смог: Servers -> localhost -> Proxy -> Restart, или пересохрани Settings -> Instance Domain."
+
+# -4: иначе на сервере с IPv6 ifconfig.me вернёт IPv6, и адреса ниже выйдут
+# битыми (http://2a04:...:8000), а A-запись на IPv6 не наводится
+IP=$(curl -4 -fsS -m 5 https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
 cat <<EOF
 
 $(say "Готово. Дальше руками:")
