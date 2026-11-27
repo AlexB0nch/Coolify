@@ -22,7 +22,7 @@
 
 set -euo pipefail
 
-COOLIFY_URL="${COOLIFY_URL:-http://95.85.242.143:8000}"
+COOLIFY_URL="${COOLIFY_URL:-http://185.20.139.146:8000}"
 COOLIFY_URL="${COOLIFY_URL%/}"
 API="${COOLIFY_URL}/api/v1"
 

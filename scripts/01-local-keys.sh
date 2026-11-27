@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-SERVER_IP="${SERVER_IP:-95.85.242.143}"
+SERVER_IP="${SERVER_IP:-185.20.139.146}"
 SSH_USER="${SSH_USER:-root}"
 SSH_PORT="${SSH_PORT:-22}"
 HOST_ALIAS="${HOST_ALIAS:-coolify}"
